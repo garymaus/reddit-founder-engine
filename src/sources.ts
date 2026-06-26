@@ -25,8 +25,12 @@ function userAgent(): string {
   );
 }
 
+// The communities this bot operates in. Override with the SUBREDDITS env var.
+const DEFAULT_SUBREDDITS =
+  "HomeImprovement,Contractor,smallbusiness,Entrepreneur,TrustAndSafety,marketing";
+
 function subreddits(): string[] {
-  return (process.env.SUBREDDITS || "smallbusiness,Entrepreneur")
+  return (process.env.SUBREDDITS || DEFAULT_SUBREDDITS)
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);

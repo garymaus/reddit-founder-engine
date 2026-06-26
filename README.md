@@ -6,6 +6,10 @@ helpful reply, emails the drafts to a person for approval, and **only posts a co
 to Reddit after that person explicitly approves it with one click**. Nothing is ever
 posted automatically.
 
+**Communities this bot operates in:** r/HomeImprovement, r/Contractor,
+r/smallbusiness, r/Entrepreneur, r/TrustAndSafety, r/marketing. (Configurable via the
+`SUBREDDITS` env var.)
+
 This repository contains the complete, self-contained code that touches the Reddit
 API. The relevance/scoring logic that decides which posts are worth a reply is backed
 by a private engine in production; a small, transparent stand-in (`src/relevance.ts`)
