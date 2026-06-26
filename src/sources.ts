@@ -27,7 +27,7 @@ function userAgent(): string {
 
 // The communities this bot operates in. Override with the SUBREDDITS env var.
 const DEFAULT_SUBREDDITS =
-  "HomeImprovement,Contractor,smallbusiness,Entrepreneur,TrustAndSafety,marketing";
+  "HomeImprovement,Contractor,smallbusiness,Entrepreneur,TrustAndSafety,marketing,datacenters";
 
 function subreddits(): string[] {
   return (process.env.SUBREDDITS || DEFAULT_SUBREDDITS)
