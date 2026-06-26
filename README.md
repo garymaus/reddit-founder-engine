@@ -28,16 +28,21 @@ voting, no mass messaging, no automated posting.
 ## How posting is gated (anti-spam by design)
 
 1. A scan drafts a reply and stores it as **`pending`** (`src/store.ts`).
-2. A digest email links to a confirmation page for each draft (`src/email.ts`).
-3. The confirmation page (`GET /reddit/approve/:id`) lets the human **edit** the reply.
-   It carries an HMAC nonce that only this server can generate.
-4. Submitting the page (`POST /reddit/post/:id`) verifies the nonce, **atomically
+2. A digest email links to a confirmation page for each draft (`src/email.ts`). Each
+   link carries an **HMAC token** (`?t=`) that only the holder of `APPROVAL_SECRET`
+   can generate. This token is the bearer capability that authorizes posting, and it
+   travels **only** in the email — no route ever discloses it.
+3. The confirmation page (`GET /reddit/approve/:id?t=`) validates the token, then lets
+   the human **edit** the reply. Without a valid token the page is not rendered.
+4. Submitting the page (`POST /reddit/post/:id`) re-verifies the token, **atomically
    claims** the row so it can never be posted twice, then calls `POST /api/comment`.
 
-Because the actual post requires a nonce that only exists on the rendered page, an
-email client that auto-follows inbox links cannot publish anything. Without an
-`APPROVAL_SECRET` the posting flow is **disabled** (fail-closed), never falling back
-to a guessable value.
+Because both viewing and submitting require a token that exists only in the emailed
+link, neither an email client that auto-follows inbox links nor anyone who merely
+guesses a reply id can publish anything. The admin routes (`/reddit/replies`,
+`/reddit/check`) are gated behind a separate `ADMIN_TOKEN` and **fail closed** (return
+404 when unset). Without an `APPROVAL_SECRET` the posting flow is **disabled**
+(fail-closed), never falling back to a guessable value.
 
 ## Rate / volume
 
@@ -53,9 +58,10 @@ src/
   reddit.ts      Reddit auth + checkConnection + postComment  (the only writer)
   sources.ts     public subreddit RSS discovery (read path)
   relevance.ts   transparent stand-in for the private scoring engine + draft text
-  store.ts       SQLite store of pending/posted replies (atomic claim)
-  email.ts       daily digest of drafts with one-click review links
-  server.ts      review server: approve page + post route (HMAC nonce, fail-closed)
+  store.ts       JSON-file store of pending/posted replies (atomic claim, no native deps)
+  nonce.ts       HMAC approval token shared by the email link and review server
+  email.ts       daily digest of drafts with one-click review links (token-bearing)
+  server.ts      review server: token-gated approve page + post route (fail-closed)
   scan.ts        one discovery -> draft -> digest cycle
   index.ts       starts the server; optional scheduled scans
 ```

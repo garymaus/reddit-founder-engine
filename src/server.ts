@@ -1,35 +1,34 @@
 // Review server — the human-in-the-loop gate in front of every Reddit comment.
 //
-// Two-step approval, so an email scanner that auto-follows inbox links can never
-// publish on the user's behalf:
-//   GET  /reddit/approve/:id   renders an editable confirmation page (no writes).
-//        The page carries an HMAC nonce that only this server can produce.
-//   POST /reddit/post/:id      verifies the nonce, atomically claims the row,
-//        posts the comment to Reddit, and records the result.
+// Capability model: every approval link carries an unguessable HMAC token (?t=)
+// that only the holder of APPROVAL_SECRET can produce. That token — delivered
+// solely in the digest email — is required to BOTH view the confirmation page
+// and submit the post. The server never mints or echoes it for an unauthorized
+// caller, so knowing a reply id is not enough to post.
+//   GET  /reddit/approve/:id?t=  validates the token, then renders an editable
+//        confirmation page (no writes).
+//   POST /reddit/post/:id        re-verifies the token, atomically claims the
+//        row, posts the comment to Reddit, and records the result.
+//   GET  /reddit/replies, /reddit/check  admin-only (ADMIN_TOKEN), fail closed.
 //
-// Fail-closed: without APPROVAL_SECRET the nonce cannot be made, so the approve
+// Fail-closed: without APPROVAL_SECRET the token cannot be made, so the approve
 // and post routes are disabled rather than falling back to a guessable value.
 
 import express from "express";
 import crypto from "crypto";
 import { postComment, checkConnection } from "./reddit.js";
 import { getReply, listReplies, claimForPosting, releaseClaim, markPosted } from "./store.js";
+import { verifyNonce } from "./nonce.js";
 
-function nonceSecret(): string | null {
-  const s = process.env.APPROVAL_SECRET;
-  return s && s.length > 0 ? s : null;
-}
-function makeNonce(id: string): string | null {
-  const secret = nonceSecret();
-  if (!secret) return null;
-  return crypto.createHmac("sha256", secret).update(`reddit:${id}`).digest("hex").slice(0, 32);
-}
-function verifyNonce(id: string, nonce: string): boolean {
-  if (!nonce || nonce.length !== 32) return false;
-  const expected = makeNonce(id);
-  if (!expected) return false;
+// Admin routes (listing/connectivity) are gated behind ADMIN_TOKEN. They fail
+// closed: with no token configured they return 404 rather than leaking data.
+function adminAuthorized(req: express.Request): boolean {
+  const expected = process.env.ADMIN_TOKEN;
+  if (!expected || expected.length === 0) return false;
+  const got = String(req.query.token || req.get("x-admin-token") || "");
+  if (got.length !== expected.length) return false;
   try {
-    return crypto.timingSafeEqual(Buffer.from(nonce, "utf8"), Buffer.from(expected, "utf8"));
+    return crypto.timingSafeEqual(Buffer.from(got), Buffer.from(expected));
   } catch {
     return false;
   }
@@ -58,20 +57,33 @@ export function createServer(): express.Express {
   app.use(express.urlencoded({ extended: false }));
 
   // Connectivity probe — confirms which account replies post as.
-  app.get("/reddit/check", async (_req, res) => {
+  // Admin-only: must present ADMIN_TOKEN (?token= or x-admin-token header).
+  app.get("/reddit/check", async (req, res) => {
+    if (!adminAuthorized(req)) return res.status(404).json({ ok: false, error: "not found" });
     res.json(await checkConnection());
   });
 
-  // List pending/posted replies (handy for a simple admin view).
-  app.get("/reddit/replies", (_req, res) => {
+  // List pending/posted replies (simple admin view). Admin-only, fails closed —
+  // reply ids are bearer-adjacent, so this is never exposed without ADMIN_TOKEN.
+  app.get("/reddit/replies", (req, res) => {
+    if (!adminAuthorized(req)) return res.status(404).json({ ok: false, error: "not found" });
     res.json({ ok: true, replies: listReplies() });
   });
 
   // Step 1 — editable confirmation page. No state change here.
+  // Requires the HMAC token from the emailed link (?t=). Without a valid token
+  // the page is not rendered and the nonce is never disclosed, so knowing a
+  // reply id alone cannot reach the post step.
   app.get("/reddit/approve/:id", (req, res) => {
     const id = String(req.params.id || "").slice(0, 64);
-    const row = getReply(id);
+    const token = String(req.query.t || "");
     res.setHeader("Content-Type", "text/html; charset=utf-8");
+    if (!verifyNonce(id, token)) {
+      return res
+        .status(403)
+        .send(page("Invalid link", "#f87171", `<div style="font-size:20px;">This approval link is invalid or has expired. Open the most recent link from your digest email.</div>`));
+    }
+    const row = getReply(id);
     if (!row) {
       return res
         .status(404)
@@ -83,12 +95,8 @@ export function createServer(): express.Express {
         : "";
       return res.send(page("Already posted", "#34d399", `<div style="font-size:20px;">Already posted to Reddit.</div>${link}`));
     }
-    const nonce = makeNonce(id);
-    if (!nonce) {
-      return res
-        .status(503)
-        .send(page("Posting disabled", "#fbbf24", `<div style="font-size:20px;">Posting is disabled — APPROVAL_SECRET is not set.</div>`));
-    }
+    // token was already validated above; reuse it as the form nonce.
+    const nonce = token;
     return res.send(
       page(
         `Reply on r/${row.subreddit}?`,
@@ -96,11 +104,11 @@ export function createServer(): express.Express {
         `<div style="font-size:22px;font-weight:800;margin-bottom:6px;">Post this reply to Reddit?</div>
          <div style="font-size:13px;color:#9ca3af;margin-bottom:12px;">Replying to <a href="${esc(row.url)}" target="_blank" rel="noopener" style="color:#9ca3af;">${esc(row.title.slice(0, 120))}</a> in <strong>r/${esc(row.subreddit)}</strong>. Edit before posting if you like.</div>
          <form method="POST" action="/reddit/post/${encodeURIComponent(id)}" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').innerText='Posting…';">
-           <input type="hidden" name="nonce" value="${nonce}" />
+           <input type="hidden" name="nonce" value="${esc(nonce)}" />
            <textarea name="text" rows="8" style="width:100%;box-sizing:border-box;background:#0f172a;border:1px solid #1f2937;border-left:3px solid #2dd4bf;border-radius:6px;color:#e5e7eb;font-size:14px;line-height:1.6;padding:14px 16px;margin-bottom:18px;">${esc(row.draft_text)}</textarea>
            <button type="submit" style="background:#2dd4bf;color:#0a0a0a;border:none;font-size:14px;font-weight:700;padding:12px 22px;border-radius:6px;cursor:pointer;">Confirm &amp; post →</button>
          </form>
-         <div style="margin-top:24px;font-size:11px;color:#4b5563;line-height:1.6;">Two steps instead of one — this confirm page stops inbox link-scanners from posting on your behalf.</div>`,
+         <div style="margin-top:24px;font-size:11px;color:#4b5563;line-height:1.6;">This page opens only from the secret link in your digest email, and posting takes a second deliberate click — nothing is posted automatically.</div>`,
       ),
     );
   });

@@ -11,6 +11,7 @@
 
 import fs from "fs";
 import type { ReplyRow } from "./store.js";
+import { makeNonce } from "./nonce.js";
 
 function escapeHtml(s: string): string {
   return String(s)
@@ -29,7 +30,11 @@ export function renderDigestHtml(rows: ReplyRow[]): string {
   const base = baseUrl();
   const blocks = rows
     .map((r) => {
-      const approve = `${base}/reddit/approve/${encodeURIComponent(r.id)}`;
+      // The approval link carries the HMAC token (?t=). This token is the bearer
+      // capability that authorizes posting — it is never served by any other
+      // route, so only a holder of this emailed link can approve and post.
+      const token = makeNonce(r.id);
+      const approve = `${base}/reddit/approve/${encodeURIComponent(r.id)}${token ? `?t=${token}` : ""}`;
       return `
       <tr><td style="padding:20px 0;border-bottom:1px solid #1f2937;">
         <div style="font-size:11px;color:#6b7280;margin-bottom:6px;">r/${escapeHtml(r.subreddit)} · relevance ${r.score}</div>
